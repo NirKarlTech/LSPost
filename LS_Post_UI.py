@@ -232,63 +232,56 @@ def plot_displacement_over_time(element_ids: List[int], model: Model, directions
         return None
 
 
-def plot_velocity_over_time(element_ids: List[int], model: Model, directions: List[str]) -> Optional[go.Figure]:
-    """Plot velocity components over time for one or multiple elements."""
-    try:
-        if not element_ids or not directions:
-            st.warning("Please select at least one element and one velocity direction")
-            return None
-        
-        fig = go.Figure()
-        
-        for element_id in element_ids:
-            element = model.get_element(element_id)
-            if element.node_data is None:
-                st.warning(f"No nodal data available for element {element_id}")
-                continue
-            
-            # Plot velocity for each node in the element
-            for node_id in element.node_ids:
-                try:
-                    velocity = element.get_node_displacement(node_id)  # Returns nodal data
-                    if velocity is not None and not velocity.empty:
-                        for col in directions:
-                            if col in velocity.columns:
-                                fig.add_trace(go.Scatter(
-                                    y=velocity[col],
-                                    x=velocity.index,
-                                    mode='lines',
-                                    name=f"Elem {element_id} - Node {node_id} - {col}",
-                                    hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>Vel: %{y:.4E}<extra></extra>'
-                                ))
-                except Exception:
-                    continue
-        
-        fig.update_layout(
-            title="Velocities Over Time",
-            xaxis_title="Time (s)",
-            yaxis_title="Velocity (m/s)",
-            hovermode='x unified',
-            template='plotly_white',
-            height=500,
-            legend=dict(x=0.01, y=0.99, maxheight=150)
-        )
-        
-        return fig
-    except Exception as e:
-        st.error(f"Error plotting velocity: {str(e)}")
-        return None
+def _prepare_matsum_series(series: pd.Series, model_times: np.ndarray) -> pd.Series:
+    # Keep only matsum timestamps and preserve them. Add a zero at model end if element is deleted early.
+    if series is None or series.empty:
+        return series
 
+    out = series.copy().sort_index()
+    if model_times.size > 0:
+        final_time = float(np.max(model_times))
+        last_time = float(out.index.max())
+        if final_time > last_time:
+            out.loc[final_time] = 0.0
+            out = out.sort_index()
+    return out
+
+
+def _prepare_calculated_series(series: pd.Series, model_times: np.ndarray) -> pd.Series:
+    # Keep calculated timestamps, and append zeros after last known time for all remaining model times.
+    if series is None or series.empty:
+        return series
+
+    out = series.copy().sort_index()
+    if model_times.size > 0:
+        final_time = float(np.max(model_times))
+        last_time = float(out.index.max())
+
+        # Add any missing model times beyond the last known calculation time with zeros
+        if final_time > last_time:
+            times_to_add = model_times[model_times > last_time]
+            if times_to_add.size > 0:
+                add_index = pd.Index(times_to_add)
+                out = out.reindex(out.index.union(add_index))
+                out.loc[out.index > last_time] = 0.0
+
+    return out
 
 def plot_internal_energy_over_time(
     element_ids: List[int],
     model: Model,
-    use_matsum: bool = True,
+    show_matsum: bool = True,
+    show_calculated: bool = False,
+    show_combined: bool = False,
+    divide_by_area: bool = False,
 ) -> Optional[go.Figure]:
     """Plot internal energy over time for one or multiple elements.
 
     Args:
-        use_matsum: If True (default), use part matsum for each element; otherwise use traction-separation calculation.
+        show_matsum: If True, show part matsum energy
+        show_calculated: If True, show calculated cumulative energy
+        show_combined: If True, plot both on same graph
+        divide_by_area: If True, divide calculated energy by element area
     """
     try:
         if not element_ids:
@@ -301,34 +294,67 @@ def plot_internal_energy_over_time(
             element = model.get_element(element_id)
             part = model.get_part(element.pid)
 
-            if use_matsum and part.internal_energy is not None and not part.internal_energy.empty:
-                energy_series = part.internal_energy
+            if show_matsum and part.internal_energy is not None and not part.internal_energy.empty:
+                energy_series = part.internal_energy.copy()
                 source_tag = "Matsum"
-            else:
+                if divide_by_area:
+                    energy_series = energy_series / element.area
+                    source_tag += " / Area"
+
+                energy_series = _prepare_matsum_series(energy_series, model.times)
+
+                fig.add_trace(go.Scatter(
+                    y=energy_series,
+                    x=energy_series.index,
+                    mode='lines',
+                    name=f"Elem {element_id} (Part {element.pid}, {source_tag})",
+                    hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>Energy: %{y:.4E}<extra></extra>'
+                ))
+
+            if show_calculated:
                 try:
-                    energy_series = element.calculate_internal_energy(use_cohesive_separation=True)
-                    source_tag = "Calculated"
+                    cumulative_energy = element.calculate_internal_energy(use_cohesive_separation=True)
+                    energy_series = cumulative_energy
+                    if divide_by_area:
+                        energy_series = energy_series / element.area
+                    source_tag = "Calculated" + (" / Area" if divide_by_area else "")
+
+                    energy_series = _prepare_calculated_series(energy_series, model.times)
+
+                    fig.add_trace(go.Scatter(
+                        y=energy_series,
+                        x=energy_series.index,
+                        mode='lines',
+                        name=f"Elem {element_id} ({source_tag})",
+                        hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>Energy: %{y:.4E}<extra></extra>'
+                    ))
                 except Exception as e:
                     st.warning(f"Could not compute internal energy for element {element_id}: {str(e)}")
                     continue
 
-            if energy_series is None or energy_series.empty:
-                st.warning(f"No internal energy data available for element {element_id} (Part {element.pid})")
-                continue
+        title_suffix = []
+        if show_matsum:
+            suffix = "Matsum"
+            if divide_by_area:
+                suffix += " / Area"
+            title_suffix.append(suffix)
+        if show_calculated:
+            suffix = "Calculated"
+            if divide_by_area:
+                suffix += " / Area"
+            title_suffix.append(suffix)
+        title_suffix = " & ".join(title_suffix) if title_suffix else "Energy"
 
-            fig.add_trace(go.Scatter(
-                y=energy_series,
-                x=energy_series.index,
-                mode='lines',
-                name=f"Elem {element_id} (Part {element.pid}, {source_tag})",
-                hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>Energy: %{y:.4E}<extra></extra>'
-            ))
+        yaxis_label = "Internal Energy"
+        if divide_by_area and (show_matsum or show_calculated):
+            yaxis_label += " (J/m²)"
+        else:
+            yaxis_label += " (J)"
 
-        title_suffix = "Matsum" if use_matsum else "Calculated"
         fig.update_layout(
             title=f"Internal Energy Over Time ({title_suffix})",
             xaxis_title="Time (s)",
-            yaxis_title="Internal Energy (J)",
+            yaxis_title=yaxis_label,
             hovermode='x unified',
             template='plotly_white',
             height=500,
@@ -370,10 +396,13 @@ def plot_gc_over_time(
                     st.warning(f"Could not calculate G_c for element {element_id}")
                     continue
                 
-                # Plot cumulative G_c over time
+                # Plot cumulative G_c over time (already per unit area)
+                g_values = result_df['G_cumulative']
+                g_values = _prepare_calculated_series(g_values, model.times)
+
                 fig.add_trace(go.Scatter(
-                    y=result_df['G_cumulative'],
-                    x=result_df.index,
+                    y=g_values,
+                    x=g_values.index,
                     mode='lines',
                     name=f"Elem {element_id} (Final G: {final_Gc:.4E})",
                     hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>G: %{y:.4E}<extra></extra>'
@@ -401,49 +430,6 @@ def plot_gc_over_time(
         st.error(f"Error plotting G_c: {str(e)}")
         return None
 
-
-def plot_cohesive_separation(element_ids: List[int], model: Model) -> Optional[go.Figure]:
-    """Plot cohesive separation (relative displacement between faces) for one or multiple elements."""
-    try:
-        if not element_ids:
-            st.warning("Please select at least one element")
-            return None
-        
-        fig = go.Figure()
-        
-        for element_id in element_ids:
-            element = model.get_element(element_id)
-            
-            cohesive_sep = element.get_cohesive_separation()
-            if cohesive_sep is None or cohesive_sep.empty:
-                st.warning(f"No cohesive separation data available for element {element_id}")
-                continue
-            
-            # Plot separation components
-            for col in ['x_sep', 'y_sep', 'z_sep', 'magnitude']:
-                if col in cohesive_sep.columns:
-                    fig.add_trace(go.Scatter(
-                        y=cohesive_sep[col],
-                        x=cohesive_sep.index,
-                        mode='lines',
-                        name=f"Elem {element_id} - {col}",
-                        hovertemplate='<b>%{fullData.name}</b><br>Time: %{x:.4f}<br>Sep: %{y:.4E}<extra></extra>'
-                    ))
-        
-        fig.update_layout(
-            title="Cohesive Separation (Relative Displacement)",
-            xaxis_title="Time (s)",
-            yaxis_title="Separation (m)",
-            hovermode='x unified',
-            template='plotly_white',
-            height=500,
-            legend=dict(x=0.01, y=0.99)
-        )
-        
-        return fig
-    except Exception as e:
-        st.error(f"Error plotting cohesive separation: {str(e)}")
-        return None
 
 
 def plot_traction_separation_curve(
@@ -747,13 +733,11 @@ else:
             # Plot selection tabs
             st.header("📈 Visualization")
             
-            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            tab1, tab2, tab3, tab4 = st.tabs([
                 "Stress",
                 "Displacement",
-                "Velocity",
                 "Internal Energy",
-                "G_c",
-                "Cohesive Separation"
+                "G_c"
             ])
             
             with tab1:
@@ -777,7 +761,11 @@ else:
                 if stress_components:
                     fig = plot_stress_over_time(selected_elements, model, stress_components)
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"stress_{'_'.join(map(str, selected_elements))}_{'_'.join(stress_components)}",
+                        )
             
             with tab2:
                 st.subheader("Displacement Components Over Time")
@@ -788,7 +776,7 @@ else:
                     displacement_directions = st.multiselect(
                         "Select Displacement Directions:",
                         options=['x_disp', 'y_disp', 'z_disp'],
-                        default=['x_disp'],
+                        default=['z_disp'],
                         key="displacement_directions"
                     )
                 
@@ -803,38 +791,96 @@ else:
                 if displacement_directions:
                     fig = plot_displacement_over_time(selected_elements, model, displacement_directions, use_average)
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"disp_{'_'.join(map(str, selected_elements))}_{'_'.join(displacement_directions)}_{use_average}",
+                        )
             
             with tab3:
-                st.subheader("Velocity Components Over Time")
-                velocity_directions = st.multiselect(
-                    "Select Velocity Directions:",
-                    options=['x_vel', 'y_vel', 'z_vel'],
-                    default=['x_vel'],
-                    key="velocity_directions"
-                )
-                
-                if velocity_directions:
-                    fig = plot_velocity_over_time(selected_elements, model, velocity_directions)
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-            
-            with tab4:
                 st.subheader("Internal Energy Over Time")
 
-                energy_mode = st.radio(
-                    "Internal energy source:",
-                    options=["Matsum", "Calculated"],
-                    index=0,
-                    help="Matsum is the default part energy. Calculated uses traction-separation integration.",
-                )
-
-                use_matsum = (energy_mode == "Matsum")
-                fig = plot_internal_energy_over_time(selected_elements, model, use_matsum=use_matsum)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                col1, col2 = st.columns(2)
+                with col1:
+                    show_matsum = st.checkbox("Show Matsum", value=True, key="show_matsum")
+                with col2:
+                    show_calculated = st.checkbox("Show Calculated", value=False, key="show_calculated")
+                
+                divide_by_area = st.checkbox("Divide Calculated by Area", value=False, key="divide_energy_by_area")
+                show_combined = st.checkbox("Show Both on One Graph", value=False, key="show_combined")
+                
+                # Handle non-area case: side by side when both selected and not combined
+                if not divide_by_area and show_matsum and show_calculated and not show_combined:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Matsum Internal Energy**")
+                        fig_matsum = plot_internal_energy_over_time(selected_elements, model, show_matsum=True, show_calculated=False, show_combined=False, divide_by_area=False)
+                        if fig_matsum:
+                            fig_matsum.update_layout(title="Matsum Internal Energy Over Time")
+                            st.plotly_chart(
+                                fig_matsum,
+                                use_container_width=True,
+                                key=f"matsum_energy_{'_'.join(map(str, selected_elements))}_no_area",
+                            )
+                    with col2:
+                        st.markdown("**Calculated Internal Energy**")
+                        fig_calc = plot_internal_energy_over_time(selected_elements, model, show_matsum=False, show_calculated=True, show_combined=False, divide_by_area=False)
+                        if fig_calc:
+                            fig_calc.update_layout(title="Calculated Internal Energy Over Time")
+                            st.plotly_chart(
+                                fig_calc,
+                                use_container_width=True,
+                                key=f"calculated_energy_{'_'.join(map(str, selected_elements))}_no_area",
+                            )
+                
+                if divide_by_area:
+                    if show_combined:
+                        # Show both matsum and calculated on the same graph, divided by area
+                        fig_energy = plot_internal_energy_over_time(selected_elements, model, show_matsum=True, show_calculated=True, show_combined=True, divide_by_area=True)
+                        if fig_energy:
+                            fig_energy.update_layout(title="Internal Energy / Area Over Time")
+                            st.plotly_chart(
+                                fig_energy,
+                                use_container_width=True,
+                                key=f"energy_both_{'_'.join(map(str, selected_elements))}_area",
+                            )
+                    else:
+                        # Show side by side: matsum/area and G_C mixed
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("**Matsum Energy / Area**")
+                            fig_matsum = plot_internal_energy_over_time(selected_elements, model, show_matsum=True, show_calculated=False, show_combined=False, divide_by_area=True)
+                            if fig_matsum:
+                                fig_matsum.update_layout(title="Matsum Energy / Area Over Time")
+                                st.plotly_chart(
+                                    fig_matsum,
+                                    use_container_width=True,
+                                    key=f"matsum_area_{'_'.join(map(str, selected_elements))}",
+                                )
+                        with col2:
+                            st.markdown("**G_C (Mixed)**")
+                            fig_gc = plot_gc_over_time(selected_elements, model, mode="C")
+                            if fig_gc:
+                                fig_gc.update_layout(title="Critical Energy Release Rate (G_C) Over Time")
+                                st.plotly_chart(
+                                    fig_gc,
+                                    use_container_width=True,
+                                    key=f"gc_mixed_side_{'_'.join(map(str, selected_elements))}",
+                                )
+                elif not (not divide_by_area and show_matsum and show_calculated and not show_combined) and (show_matsum or show_calculated):
+                    fig = plot_internal_energy_over_time(selected_elements, model, show_matsum=show_matsum, show_calculated=show_calculated, show_combined=show_combined, divide_by_area=divide_by_area)
+                    if fig:
+                        if divide_by_area:
+                            fig.update_layout(title="Internal Energy / Area Over Time")
+                        else:
+                            fig.update_layout(title="Internal Energy Over Time")
+                        st.plotly_chart(
+                            fig,
+                            use_container_width=True,
+                            key=f"energy_{'_'.join(map(str, selected_elements))}_{show_matsum}_{show_calculated}_{show_combined}_{divide_by_area}",
+                        )
             
-            with tab5:
+            with tab4:
                 st.subheader("Energy Release Rate (G_c) & Traction-Separation")
 
                 mode = st.selectbox(
@@ -849,20 +895,22 @@ else:
                 st.subheader("Energy Release Rate Over Time")
                 fig = plot_gc_over_time(selected_elements, model, mode=mode)
                 if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        key=f"gc_over_time_{'_'.join(map(str, selected_elements))}_{mode}",
+                    )
 
                 st.markdown("---")
 
                 st.subheader("Traction-Separation Curve")
                 fig = plot_traction_separation_curve(selected_elements, model, mode=mode)
                 if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            with tab6:
-                st.subheader("Cohesive Separation (δ = u_top - u_bottom)")
-                fig = plot_cohesive_separation(selected_elements, model)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        key=f"traction_separation_{'_'.join(map(str, selected_elements))}_{mode}",
+                    )
         else:
             st.info("👆 Select at least one element to view plots")
         

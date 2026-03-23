@@ -999,6 +999,11 @@ class Element:
             return self.stress_data.index.get_level_values('time').unique().values
         return np.array([])
 
+    @property
+    def area(self) -> float:
+        """Calculate the area of the element's cohesive face from initial node coordinates."""
+        return self.get_min_node_sum_face_area()[0]
+
     def get_faces(self) -> List[Tuple[int, int, int, int]]:
         """
         Get the 6 faces of the hexahedral element as tuples of node IDs.
@@ -1518,10 +1523,11 @@ class Element:
                                     If False, use single face displacement.
         
         Returns:
-            Series with cumulative internal energy at each time point
+            Series with cumulative internal energy at each time point (J)
         """
         result, _ = self.calculate_Gc_by_integration(use_cohesive_separation)
-        return result['G_cumulative']
+        # G_cumulative is computed per unit area; convert to total energy by multiplying element area.
+        return result['G_cumulative'] * self.area
 
 
 @dataclass
