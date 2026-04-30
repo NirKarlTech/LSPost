@@ -24,7 +24,7 @@ from LS_Post_data_reader import (
 
 __all__ = [
     'Model',
-    'Element', 
+    'Element',
     'Part',
     'NodoutFrame',
     'EloutFrame',

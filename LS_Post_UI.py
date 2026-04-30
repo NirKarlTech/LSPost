@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from pathlib import Path
 from typing import Optional, List, Dict
-from LS_Post_data_reader import Model
+from LS_Post_data_reader import Model, KeyFileData
 
 # Page configuration
 st.set_page_config(
@@ -50,6 +50,8 @@ def plot_stress_over_time(element_ids: List[int], model: Model, components: List
             return None
         
         fig = go.Figure()
+        end_time = model.end_time
+        model_times = model.times
         
         for element_id in element_ids:
             element = model.get_element(element_id)
@@ -58,6 +60,15 @@ def plot_stress_over_time(element_ids: List[int], model: Model, components: List
                 continue
             
             stress_data = element.stress_data.copy()
+            
+            # Extend with zeros to analysis end after element deletion
+            last_stress_time = float(stress_data.index.max())
+            if end_time > last_stress_time:
+                times_to_add = model_times[model_times > last_stress_time]
+                if times_to_add.size > 0:
+                    add_index = pd.Index(times_to_add)
+                    stress_data = stress_data.reindex(stress_data.index.union(add_index))
+                    stress_data.loc[stress_data.index > last_stress_time] = 0.0
             
             # Add selected stress components
             for col in components:
@@ -77,7 +88,8 @@ def plot_stress_over_time(element_ids: List[int], model: Model, components: List
             hovermode='x unified',
             template='plotly_white',
             height=500,
-            legend=dict(x=0.01, y=0.99)
+            legend=dict(x=0.01, y=0.99),
+            xaxis_range=[0, end_time],
         )
         
         return fig
@@ -153,6 +165,7 @@ def plot_displacement_over_time(element_ids: List[int], model: Model, directions
             return None
         
         fig = go.Figure()
+        end_time = model.end_time
         
         for element_id in element_ids:
             element = model.get_element(element_id)
@@ -160,10 +173,20 @@ def plot_displacement_over_time(element_ids: List[int], model: Model, directions
                 st.warning(f"No nodal data available for element {element_id}")
                 continue
             
+            # Determine element deletion time from stress data
+            deletion_time = None
+            if element.stress_data is not None and not element.stress_data.empty:
+                deletion_time = float(element.stress_data.index.max())
+            
             if use_average:
                 # Plot average displacement for top/bottom faces and difference
                 avg_displacements = calculate_average_element_displacement(element, directions)
                 if avg_displacements is not None:
+                    # Zero displacement after element deletion
+                    if deletion_time is not None:
+                        for key in ('top', 'bottom', 'diff'):
+                            avg_displacements[key] = avg_displacements[key].copy()
+                            avg_displacements[key].loc[avg_displacements[key].index > deletion_time] = 0.0
                     for col in directions:
                         # Plot top face average
                         if col in avg_displacements['top'].columns:
@@ -203,6 +226,10 @@ def plot_displacement_over_time(element_ids: List[int], model: Model, directions
                     try:
                         displacement = element.get_node_displacement(node_id)
                         if displacement is not None and not displacement.empty:
+                            # Zero displacement after element deletion
+                            if deletion_time is not None:
+                                displacement = displacement.copy()
+                                displacement.loc[displacement.index > deletion_time] = 0.0
                             for col in directions:
                                 if col in displacement.columns:
                                     fig.add_trace(go.Scatter(
@@ -223,7 +250,8 @@ def plot_displacement_over_time(element_ids: List[int], model: Model, directions
             hovermode='x unified',
             template='plotly_white',
             height=500,
-            legend=dict(x=0.01, y=0.99, maxheight=150)
+            legend=dict(x=0.01, y=0.99, maxheight=150),
+            xaxis_range=[0, end_time],
         )
         
         return fig
@@ -241,8 +269,14 @@ def _prepare_matsum_series(series: pd.Series, model_times: np.ndarray) -> pd.Ser
     if model_times.size > 0:
         final_time = float(np.max(model_times))
         last_time = float(out.index.max())
+        # Fix: match index type for assignment
+        if isinstance(out.index[0], str):
+            final_time_idx = str(final_time)
+        else:
+            final_time_idx = final_time
         if final_time > last_time:
-            out.loc[final_time] = 0.0
+            # Use .at for scalar assignment
+            out.at[final_time_idx] = 0.0
             out = out.sort_index()
     return out
 
@@ -289,6 +323,7 @@ def plot_internal_energy_over_time(
             return None
 
         fig = go.Figure()
+        end_time = model.end_time
 
         for element_id in element_ids:
             element = model.get_element(element_id)
@@ -358,6 +393,7 @@ def plot_internal_energy_over_time(
             hovermode='x unified',
             template='plotly_white',
             height=500,
+            xaxis_range=[0, end_time],
         )
         
         return fig
@@ -382,6 +418,7 @@ def plot_gc_over_time(
             return None
         
         fig = go.Figure()
+        end_time = model.end_time
         
         for element_id in element_ids:
             element = model.get_element(element_id)
@@ -423,6 +460,7 @@ def plot_gc_over_time(
             hovermode='x unified',
             template='plotly_white',
             height=500,
+            xaxis_range=[0, end_time],
         )
         
         return fig
@@ -579,12 +617,12 @@ with st.sidebar:
         keyfile_from_url = query_params.get("keyfile", None)
     except AttributeError:
         # Fall back to old API
-        query_params = st.experimental_get_query_params()
+        # query_params = st.experimental_get_query_params()  # Removed: not supported in current Streamlit
         folder_from_url = query_params.get("folder", [None])[0]
         keyfile_from_url = query_params.get("keyfile", [None])[0]
     
     # Initialize with query params or defaults
-    default_folder = folder_from_url if folder_from_url else r"C:\Users\nir\Desktop\Final_Project\analysis\single_element_mode_1_two_ways"
+    default_folder = folder_from_url if folder_from_url else r"C:\Users\nir\Projects\FInal-Project\Analysis\single_element_mode_1_two_ways"
     default_keyfile = keyfile_from_url if keyfile_from_url else "simgle_element_mode_1.k"
     
     # Folder and keyfile selection
@@ -594,13 +632,44 @@ with st.sidebar:
         help="Path to folder containing LS-DYNA output files",
         key="folder_input"
     )
-    
-    keyfile_name = st.text_input(
-        "Keyword File Name",
-        value=default_keyfile,
-        help="Name of the .k file in the analysis folder",
-        key="keyfile_input"
-    )
+
+    # Auto-detect k files in the selected folder
+    auto_keyfile = default_keyfile
+    detected_k_files = []
+    folder_p = Path(folder_path)
+    if folder_p.is_dir():
+        detected_k_files = sorted(
+            [f.name for f in folder_p.iterdir()
+             if f.is_file() and f.suffix.lower() in ('.k', '.key', '.dyn')]
+        )
+        if detected_k_files:
+            # Use the first detected file unless the URL/default already matches one
+            if default_keyfile not in detected_k_files:
+                auto_keyfile = detected_k_files[0]
+
+    # If user clicked rescan, force re-detect and update before widget is created
+    if st.session_state.get('_rescan_k', False):
+        st.session_state['_rescan_k'] = False
+        if detected_k_files:
+            auto_keyfile = detected_k_files[0]
+            st.session_state['keyfile_input'] = auto_keyfile
+
+    col_file, col_btn = st.columns([5, 1])
+    with col_file:
+        keyfile_name = st.text_input(
+            "Keyword File Name",
+            value=auto_keyfile,
+            help="Name of the .k file in the analysis folder (auto-detected from folder)",
+            key="keyfile_input"
+        )
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄", key="rescan_k_btn", help="Rescan folder for k files"):
+            st.session_state['_rescan_k'] = True
+            st.rerun()
+
+    if detected_k_files and len(detected_k_files) > 1:
+        st.caption(f"Found {len(detected_k_files)} k files: {', '.join(detected_k_files)}")
     
     if st.button("🔄 Load Model", use_container_width=True):
         # Save to query parameters (persists across refreshes)
@@ -609,9 +678,7 @@ with st.sidebar:
             st.query_params["folder"] = folder_path
             st.query_params["keyfile"] = keyfile_name
         except (AttributeError, TypeError):
-            # Fall back to old API
-            st.experimental_set_query_params(folder=folder_path, keyfile=keyfile_name)
-        
+            pass
         # Load the model
         st.session_state.model = load_model_cached(folder_path, keyfile_name)
         st.session_state.model_loaded = True
@@ -733,13 +800,236 @@ else:
             # Plot selection tabs
             st.header("📈 Visualization")
             
-            tab1, tab2, tab3, tab4 = st.tabs([
+            tab1, tab2, tab3, tab4, tab5 = st.tabs([
                 "Stress",
                 "Displacement",
                 "Internal Energy",
-                "G_c"
+                "G_c",
+                "G-N"
             ])
-            
+
+            with tab1:
+                            with tab5:
+                                st.subheader("G-N Curve Plot")
+
+                                # Collect G-N curves from the model's own k file
+                                gn_curves = dict(model.get_gn_curves())
+
+                                # Option to load external k file with G-N curves
+                                ext_file = st.file_uploader(
+                                    "Load G-N curves from external k file (optional)",
+                                    type=["k", "key", "dyn"],
+                                    key="gn_external_file",
+                                )
+                                if ext_file is not None:
+                                    try:
+                                        ext_lines = ext_file.getvalue().decode("utf-8", errors="replace").splitlines()
+                                        ext_kf = KeyFileData()
+                                        ext_curves = ext_kf._parse_gn_curves(ext_lines)
+                                        if ext_curves:
+                                            for lcid, cdata in ext_curves.items():
+                                                label = f"ext_{lcid}"
+                                                cdata['title'] = f"G-N (external, LCID {lcid})"
+                                                gn_curves[label] = cdata
+                                            st.success(f"Loaded {len(ext_curves)} G-N curve(s) from uploaded file.")
+                                        else:
+                                            st.warning("No G-N curves found in the uploaded file.")
+                                    except Exception as e:
+                                        st.error(f"Error reading external file: {e}")
+
+                                if not gn_curves:
+                                    st.info("No G-N curves found. Upload an external k file or ensure your model k file contains *DEFINE_CURVE_TITLE blocks with title 'G-N'.")
+                                else:
+                                    # Let user select curve by LCID
+                                    def _gn_label(key):
+                                        entry = gn_curves.get(key, {})
+                                        title = entry.get('title', 'G-N')
+                                        return f"{title} (LCID {key})"
+
+                                    selected_lcid = st.selectbox(
+                                        "Select G-N curve:",
+                                        options=list(gn_curves.keys()),
+                                        format_func=_gn_label,
+                                        key="gn_curve_selector"
+                                    )
+                                    curve_data = gn_curves[selected_lcid]['data'] if selected_lcid in gn_curves else []
+
+                                    # Display mode selector
+                                    gn_display = st.selectbox(
+                                        "Display mode:",
+                                        options=["Mode I (G₁c)", "Mode II (G₂c)", "Side by Side", "Overlay"],
+                                        key="gn_display_mode",
+                                    )
+
+                                    # Prepare element points: G_1c (mode I) and G_2c (mode II)
+                                    points_I = []
+                                    points_II = []
+                                    for eid in selected_elements:
+                                        try:
+                                            element = model.get_element(eid)
+                                            _, max_gc_I = element.calculate_Gc_by_integration(use_cohesive_separation=True, mode="I")
+                                            _, max_gc_II = element.calculate_Gc_by_integration(use_cohesive_separation=True, mode="II")
+                                            points_I.append({'eid': eid, 'G': max_gc_I})
+                                            points_II.append({'eid': eid, 'G': max_gc_II})
+                                        except Exception:
+                                            points_I.append({'eid': eid, 'G': np.nan})
+                                            points_II.append({'eid': eid, 'G': np.nan})
+
+                                    # Fit power-law curve: log(G) = a + b*log(N)  =>  G = exp(a) * N^b
+                                    fit_coeffs = None
+                                    a_coeff = b_coeff = None
+                                    if curve_data and len(curve_data) >= 2:
+                                        curve_N_vals = np.array([n for n, g in curve_data])
+                                        curve_G_vals = np.array([g for n, g in curve_data])
+                                        pos_mask = (curve_N_vals > 0) & (curve_G_vals > 0)
+                                        if pos_mask.sum() >= 2:
+                                            log_N = np.log(curve_N_vals[pos_mask])
+                                            log_G = np.log(curve_G_vals[pos_mask])
+                                            fit_coeffs = np.polyfit(log_N, log_G, 1)
+                                            b_coeff, a_coeff = fit_coeffs
+
+                                    # Interpolate N for each element point
+                                    for pt in points_I + points_II:
+                                        if fit_coeffs is not None and not np.isnan(pt['G']) and pt['G'] > 0:
+                                            log_n = (np.log(pt['G']) - a_coeff) / b_coeff
+                                            pt['N'] = float(np.exp(log_n))
+                                        else:
+                                            pt['N'] = np.nan
+
+                                    # Helper: build a G-N figure for a given set of points
+                                    def _build_gn_figure(points_list, mode_label, marker_symbol, fit_line_color):
+                                        fig = go.Figure()
+                                        if curve_data:
+                                            curve_N = [n for n, g in curve_data]
+                                            curve_G = [g for n, g in curve_data]
+                                            fig.add_trace(go.Scatter(
+                                                x=curve_N, y=curve_G,
+                                                mode='lines', name="Linear segments",
+                                                line=dict(width=1, color='gray', dash='dash'),
+                                            ))
+                                            fig.add_trace(go.Scatter(
+                                                x=curve_N, y=curve_G,
+                                                mode='markers', name="G-N data points",
+                                                marker=dict(size=10, color='black', symbol='diamond'),
+                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>G = %{y:.4E}<extra></extra>",
+                                            ))
+                                            if fit_coeffs is not None:
+                                                n_min, n_max = min(curve_N), max(curve_N)
+                                                n_fit = np.logspace(np.log10(n_min), np.log10(n_max), 200)
+                                                g_fit = np.exp(a_coeff) * n_fit ** b_coeff
+                                                fig.add_trace(go.Scatter(
+                                                    x=n_fit, y=g_fit, mode='lines',
+                                                    name=f"Fitted: G = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
+                                                    line=dict(width=3, color=fit_line_color),
+                                                ))
+                                        colors = px.colors.qualitative.Plotly
+                                        for i, pt in enumerate(points_list):
+                                            color = colors[i % len(colors)]
+                                            fig.add_trace(go.Scatter(
+                                                x=[pt['N']], y=[pt['G']],
+                                                mode='markers',
+                                                name=f"Elem {pt['eid']} {mode_label}",
+                                                marker=dict(size=14, symbol=marker_symbol, color=color,
+                                                            line=dict(width=2, color='black')),
+                                                hovertemplate=(
+                                                    f"<b>Element {pt['eid']} ({mode_label})</b><br>"
+                                                    f"{mode_label} = {pt['G']:.4E} J/m²<br>"
+                                                    f"N = {pt['N']:.4E}<extra></extra>"
+                                                ),
+                                            ))
+                                        fig.update_layout(
+                                            title=f"G-N Plot ({mode_label})",
+                                            xaxis_title="N (Cycles to Failure)",
+                                            yaxis_title=f"G ({mode_label}, J/m²)",
+                                            hovermode='closest',
+                                            xaxis_type='log',
+                                            template='plotly_white',
+                                            height=500,
+                                        )
+                                        return fig
+
+                                    if gn_display == "Mode I (G₁c)":
+                                        fig = _build_gn_figure(points_I, "G₁c", "circle", "blue")
+                                        st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_I_{selected_lcid}")
+
+                                    elif gn_display == "Mode II (G₂c)":
+                                        fig = _build_gn_figure(points_II, "G₂c", "triangle-up", "red")
+                                        st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_II_{selected_lcid}")
+
+                                    elif gn_display == "Side by Side":
+                                        col_left, col_right = st.columns(2)
+                                        with col_left:
+                                            st.markdown("**Mode I (G₁c)**")
+                                            fig_I = _build_gn_figure(points_I, "G₁c", "circle", "blue")
+                                            st.plotly_chart(fig_I, use_container_width=True, key=f"gn_plot_sbs_I_{selected_lcid}")
+                                        with col_right:
+                                            st.markdown("**Mode II (G₂c)**")
+                                            fig_II = _build_gn_figure(points_II, "G₂c", "triangle-up", "red")
+                                            st.plotly_chart(fig_II, use_container_width=True, key=f"gn_plot_sbs_II_{selected_lcid}")
+
+                                    else:  # Overlay
+                                        fig = go.Figure()
+                                        if curve_data:
+                                            curve_N = [n for n, g in curve_data]
+                                            curve_G = [g for n, g in curve_data]
+                                            fig.add_trace(go.Scatter(
+                                                x=curve_N, y=curve_G,
+                                                mode='lines', name="Linear segments",
+                                                line=dict(width=1, color='gray', dash='dash'),
+                                            ))
+                                            fig.add_trace(go.Scatter(
+                                                x=curve_N, y=curve_G,
+                                                mode='markers', name="G-N data points",
+                                                marker=dict(size=10, color='black', symbol='diamond'),
+                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>G = %{y:.4E}<extra></extra>",
+                                            ))
+                                            if fit_coeffs is not None:
+                                                n_min, n_max = min(curve_N), max(curve_N)
+                                                n_fit = np.logspace(np.log10(n_min), np.log10(n_max), 200)
+                                                g_fit = np.exp(a_coeff) * n_fit ** b_coeff
+                                                fig.add_trace(go.Scatter(
+                                                    x=n_fit, y=g_fit, mode='lines',
+                                                    name=f"Fitted: G = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
+                                                    line=dict(width=3, color='blue'),
+                                                ))
+                                        colors = px.colors.qualitative.Plotly
+                                        for i, (pt_I, pt_II) in enumerate(zip(points_I, points_II)):
+                                            color = colors[i % len(colors)]
+                                            fig.add_trace(go.Scatter(
+                                                x=[pt_I['N']], y=[pt_I['G']],
+                                                mode='markers',
+                                                name=f"Elem {pt_I['eid']} G₁c",
+                                                marker=dict(size=14, symbol='circle', color=color,
+                                                            line=dict(width=2, color='black')),
+                                                hovertemplate=(
+                                                    f"<b>Element {pt_I['eid']} (Mode I)</b><br>"
+                                                    f"G₁c = {pt_I['G']:.4E} J/m²<br>"
+                                                    f"N = {pt_I['N']:.4E}<extra></extra>"
+                                                ),
+                                            ))
+                                            fig.add_trace(go.Scatter(
+                                                x=[pt_II['N']], y=[pt_II['G']],
+                                                mode='markers',
+                                                name=f"Elem {pt_II['eid']} G₂c",
+                                                marker=dict(size=14, symbol='triangle-up', color=color,
+                                                            line=dict(width=2, color='black')),
+                                                hovertemplate=(
+                                                    f"<b>Element {pt_II['eid']} (Mode II)</b><br>"
+                                                    f"G₂c = {pt_II['G']:.4E} J/m²<br>"
+                                                    f"N = {pt_II['N']:.4E}<extra></extra>"
+                                                ),
+                                            ))
+                                        fig.update_layout(
+                                            title="G-N Plot (G₁c and G₂c Overlay)",
+                                            xaxis_title="N (Cycles to Failure)",
+                                            yaxis_title="G (J/m²)",
+                                            hovermode='closest',
+                                            xaxis_type='log',
+                                            template='plotly_white',
+                                            height=500,
+                                        )
+                                        st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_overlay_{selected_lcid}")
+
             with tab1:
                 st.subheader("Stress Components Over Time")
                 # Get available stress components from first element
@@ -747,17 +1037,14 @@ else:
                 available_stress = []
                 if element.stress_data is not None:
                     available_stress = [col for col in element.stress_data.columns]
-                
                 # Determine default: sig_zz if available, otherwise first 3 components
                 default_stress = ['sig_zz'] if 'sig_zz' in available_stress else (available_stress[:3] if len(available_stress) > 0 else [])
-                
                 stress_components = st.multiselect(
                     "Select Stress Components:",
                     options=available_stress,
                     default=default_stress,
                     key="stress_components"
                 )
-                
                 if stress_components:
                     fig = plot_stress_over_time(selected_elements, model, stress_components)
                     if fig:
