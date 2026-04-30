@@ -1030,6 +1030,130 @@ else:
                                         )
                                         st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_overlay_{selected_lcid}")
 
+                                    # ──────────────────────────────────────────
+                                    # N Fringe – 3D coloring by cycles to failure
+                                    # ──────────────────────────────────────────
+                                    st.divider()
+                                    st.subheader("🎨 N Fringe – Cycles to Failure")
+
+                                    fringe_col1, fringe_col2 = st.columns([3, 1])
+                                    with fringe_col1:
+                                        fringe_mode = st.radio(
+                                            "Color elements by N from:",
+                                            options=["Mode I (G₁c)", "Mode II (G₂c)", "Critical (min N)"],
+                                            horizontal=True,
+                                            key="gn_fringe_mode",
+                                        )
+                                    with fringe_col2:
+                                        fringe_log = st.checkbox(
+                                            "Log scale", value=True, key="gn_fringe_log",
+                                            help="Color by log₁₀(N) instead of raw N",
+                                        )
+
+                                    if st.button("🎨 Generate N Fringe", key="gn_fringe_btn", type="primary"):
+                                        st.session_state['gn_fringe_params'] = {
+                                            'mode': fringe_mode,
+                                            'log': fringe_log,
+                                            'lcid': selected_lcid,
+                                        }
+
+                                    if 'gn_fringe_params' in st.session_state:
+                                        _fp = st.session_state['gn_fringe_params']
+                                        _fmode = _fp['mode']
+                                        _flog = _fp['log']
+
+                                        # Resolve N per element for the chosen mode
+                                        fringe_n = {}
+                                        for pt_I, pt_II in zip(points_I, points_II):
+                                            eid = pt_I['eid']
+                                            n_I = pt_I.get('N', np.nan)
+                                            n_II = pt_II.get('N', np.nan)
+                                            if _fmode == "Mode I (G₁c)":
+                                                fringe_n[eid] = n_I
+                                            elif _fmode == "Mode II (G₂c)":
+                                                fringe_n[eid] = n_II
+                                            else:  # Critical: lowest N
+                                                valid = [v for v in [n_I, n_II] if not np.isnan(v) and v > 0]
+                                                fringe_n[eid] = min(valid) if valid else np.nan
+
+                                        # Build 3-D mesh: bottom face of each cohesive element
+                                        x_v, y_v, z_v = [], [], []
+                                        tri_i, tri_j, tri_k = [], [], []
+                                        cell_vals: list = []
+                                        fringe_rows = []
+                                        v_off = 0
+
+                                        for eid, N_val in fringe_n.items():
+                                            try:
+                                                element = model.get_element(eid)
+                                                bottom_face, _ = element.get_faces()
+                                                coords = [element.initial_node_coords[nid] for nid in bottom_face]
+                                                for c in coords:
+                                                    x_v.append(c['x'])
+                                                    y_v.append(c['y'])
+                                                    z_v.append(c['z'])
+                                                # Quad → 2 triangles (fan from vertex 0)
+                                                tri_i += [v_off, v_off]
+                                                tri_j += [v_off + 1, v_off + 2]
+                                                tri_k += [v_off + 2, v_off + 3]
+                                                color_val = (
+                                                    np.log10(N_val)
+                                                    if (_flog and not np.isnan(N_val) and N_val > 0)
+                                                    else (N_val if (not np.isnan(N_val) and N_val > 0) else np.nan)
+                                                )
+                                                cell_vals += [color_val, color_val]
+                                                v_off += 4
+                                                log_n_str = f"{np.log10(N_val):.3f}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
+                                                n_str = f"{N_val:.4E}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
+                                                fringe_rows.append({
+                                                    'Element ID': eid,
+                                                    'N (cycles)': n_str,
+                                                    'log₁₀(N)': log_n_str,
+                                                })
+                                            except Exception:
+                                                pass
+
+                                        if x_v:
+                                            valid_cv = [v for v in cell_vals if not np.isnan(v)]
+                                            cmin_v = min(valid_cv) if valid_cv else 0.0
+                                            cmax_v = max(valid_cv) if valid_cv else 1.0
+                                            cell_clean = [v if not np.isnan(v) else cmin_v for v in cell_vals]
+                                            cb_title = "log₁₀(N)" if _flog else "N (cycles)"
+
+                                            fig_fringe = go.Figure(go.Mesh3d(
+                                                x=x_v, y=y_v, z=z_v,
+                                                i=tri_i, j=tri_j, k=tri_k,
+                                                intensity=cell_clean,
+                                                intensitymode='cell',
+                                                colorscale='Jet',
+                                                cmin=cmin_v, cmax=cmax_v,
+                                                colorbar=dict(
+                                                    title=dict(text=cb_title, side='right'),
+                                                    tickformat='.2f',
+                                                ),
+                                                showscale=True,
+                                                flatshading=True,
+                                            ))
+                                            fig_fringe.update_layout(
+                                                title=f"N Fringe – {_fmode}  |  G-N curve: {_fp['lcid']}",
+                                                scene=dict(
+                                                    xaxis_title="X",
+                                                    yaxis_title="Y",
+                                                    zaxis_title="Z",
+                                                    aspectmode='data',
+                                                ),
+                                                height=600,
+                                                template='plotly_white',
+                                            )
+                                            st.plotly_chart(
+                                                fig_fringe,
+                                                use_container_width=True,
+                                                key=f"gn_fringe_{_fp['lcid']}_{_fmode}_{_flog}",
+                                            )
+                                            st.dataframe(pd.DataFrame(fringe_rows), use_container_width=True)
+                                        else:
+                                            st.warning("No element geometry available for the N fringe. Ensure node coordinates are loaded from the keyword file.")
+
             with tab1:
                 st.subheader("Stress Components Over Time")
                 # Get available stress components from first element
