@@ -1080,6 +1080,9 @@ else:
                                         x_v, y_v, z_v = [], [], []
                                         tri_i, tri_j, tri_k = [], [], []
                                         cell_vals: list = []
+                                        # Centroid lists for hover labels
+                                        cx_v, cy_v, cz_v = [], [], []
+                                        hover_custom = []
                                         fringe_rows = []
                                         v_off = 0
 
@@ -1105,6 +1108,11 @@ else:
                                                 v_off += 4
                                                 log_n_str = f"{np.log10(N_val):.3f}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
                                                 n_str = f"{N_val:.4E}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
+                                                # Centroid of bottom face for hover marker
+                                                cx_v.append(sum(c['x'] for c in coords) / len(coords))
+                                                cy_v.append(sum(c['y'] for c in coords) / len(coords))
+                                                cz_v.append(sum(c['z'] for c in coords) / len(coords))
+                                                hover_custom.append([eid, n_str, log_n_str])
                                                 fringe_rows.append({
                                                     'Element ID': eid,
                                                     'N (cycles)': n_str,
@@ -1133,6 +1141,21 @@ else:
                                                 ),
                                                 showscale=True,
                                                 flatshading=True,
+                                                hoverinfo='skip',
+                                            ))
+                                            # Invisible markers at centroids — carry the hover tooltip
+                                            fig_fringe.add_trace(go.Scatter3d(
+                                                x=cx_v, y=cy_v, z=cz_v,
+                                                mode='markers',
+                                                marker=dict(size=10, color='rgba(0,0,0,0)'),
+                                                customdata=hover_custom,
+                                                hovertemplate=(
+                                                    "<b>Element %{customdata[0]}</b><br>"
+                                                    "N = %{customdata[1]} cycles<br>"
+                                                    "log₁₀(N) = %{customdata[2]}"
+                                                    "<extra></extra>"
+                                                ),
+                                                showlegend=False,
                                             ))
                                             fig_fringe.update_layout(
                                                 title=f"N Fringe – {_fmode}  |  G-N curve: {_fp['lcid']}",
