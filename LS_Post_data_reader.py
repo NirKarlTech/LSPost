@@ -1151,40 +1151,20 @@ class KeyFileData:
         return normal_disp
 
     def get_normal_stress_for_face(self, face_node_ids: Tuple[int, int, int, int]) -> pd.Series:
-        """
-        Get the normal stress component for a given face.
-        
-        For face (n1, n2, n3, n4) which is typically the bottom face in xy-plane,
-        the normal stress is sig_zz.
-        
-        Args:
-            face_node_ids: Tuple of 4 node IDs defining the face
-            
-        Returns:
-            Series with normal stress at each time step
+        """Return the normal traction for a cohesive element face.
+
+        For ELFORM 19/20 cohesive solid elements (*MAT_138/184/185/186),
+        LS-DYNA stores force-per-unit-area in the element local frame where
+        local-z is aligned with the midsurface normal.  Per the LSTC
+        dynasupport note "Cohesive material models", the storage layout is:
+            sig_zz  -> normal traction   T_n  (Mode I driver)
+            sig_xx  -> in-plane shear #1 T_s1 (Mode II driver)
+            sig_yy  -> in-plane shear #2 T_s2 (Mode II driver)
+            sig_xy, sig_yz, sig_zx  -> empty (always zero)
         """
         if self.stress_data is None:
             raise ValueError("Stress data not loaded")
-        
-        # Get face normal direction
-        normal = self.get_face_normal_direction(face_node_ids)
-        
-        # Determine which stress component is the normal stress based on the face normal
-        # For a face with normal predominantly in z-direction, use sig_zz
-        # For x-direction use sig_xx, for y-direction use sig_yy
-        abs_normal = np.abs(normal)
-        
-        if abs_normal[2] >= abs_normal[0] and abs_normal[2] >= abs_normal[1]:
-            # Normal is primarily in z-direction
-            stress_col = 'sig_zz'
-        elif abs_normal[0] >= abs_normal[1]:
-            # Normal is primarily in x-direction
-            stress_col = 'sig_xx'
-        else:
-            # Normal is primarily in y-direction
-            stress_col = 'sig_yy'
-        
-        return self.stress_data[stress_col]
+        return self.stress_data['sig_zz']
 
     def get_cohesive_separation(self) -> pd.DataFrame:
         """
@@ -1346,26 +1326,13 @@ class KeyFileData:
         # Tractions
         normal_traction = self.get_normal_stress_for_face(bottom_face)
 
-        # Shear traction magnitude (Mode II):
-        # Per user: always use sig_xx as the shear stress for Mode II (ignore sig_zx, sig_xy, sig_yz)
-        # For backward compatibility, keep the old logic for mixed mode, but for Mode II use only sig_xx.
+        # Shear traction for cohesive elements (ELFORM 19/20, *MAT_138/184/185/186).
+        # LS-DYNA stores the two in-plane shear components in sig_xx and sig_yy;
+        # sig_xy, sig_yz, sig_zx are empty/zero for cohesive elements.
+        # (LSTC dynasupport note "Cohesive material models")
         if self.stress_data is not None:
-            if mode == "II":
-                tau1 = self.stress_data['sig_xx']
-                tau2 = 0 * tau1  # Only sig_xx used
-            else:
-                if np.abs(normal[2]) >= np.abs(normal[0]) and np.abs(normal[2]) >= np.abs(normal[1]):
-                    # Face normal is mostly z -> shear stresses are zx and yz
-                    tau1 = self.stress_data['sig_zx']
-                    tau2 = self.stress_data['sig_yz']
-                elif np.abs(normal[0]) >= np.abs(normal[1]):
-                    # Face normal is mostly x -> shear stresses are xy and zx
-                    tau1 = self.stress_data['sig_xy']
-                    tau2 = self.stress_data['sig_zx']
-                else:
-                    # Face normal is mostly y -> shear stresses are xy and yz
-                    tau1 = self.stress_data['sig_xy']
-                    tau2 = self.stress_data['sig_yz']
+            tau1 = self.stress_data['sig_xx']
+            tau2 = self.stress_data['sig_yy']
         else:
             tau1 = 0
             tau2 = 0
@@ -1645,17 +1612,20 @@ class Element:
         return normal_disp
 
     def get_normal_stress_for_face(self, face_node_ids: Tuple[int, ...]) -> pd.Series:
+        """Return the normal traction for a cohesive element face.
+
+        For ELFORM 19/20 cohesive solid elements (*MAT_138/184/185/186),
+        LS-DYNA stores force-per-unit-area in the element local frame where
+        local-z is aligned with the midsurface normal.  Per the LSTC
+        dynasupport note "Cohesive material models", the storage layout is:
+            sig_zz  -> normal traction   T_n  (Mode I driver)
+            sig_xx  -> in-plane shear #1 T_s1 (Mode II driver)
+            sig_yy  -> in-plane shear #2 T_s2 (Mode II driver)
+            sig_xy, sig_yz, sig_zx  -> empty (always zero)
+        """
         if self.stress_data is None:
             raise ValueError("Stress data not loaded")
-        normal = self.get_face_normal_direction(face_node_ids)
-        abs_normal = np.abs(normal)
-        if abs_normal[2] >= abs_normal[0] and abs_normal[2] >= abs_normal[1]:
-            stress_col = 'sig_zz'
-        elif abs_normal[0] >= abs_normal[1]:
-            stress_col = 'sig_xx'
-        else:
-            stress_col = 'sig_yy'
-        return self.stress_data[stress_col]
+        return self.stress_data['sig_zz']
 
     def get_cohesive_separation(self) -> pd.DataFrame:
         if self.node_data is None:
@@ -1712,7 +1682,20 @@ class Element:
         use_cohesive_separation: bool = True,
         mode: str = "I",
     ) -> Tuple[pd.DataFrame, float]:
-        """Calculate G_c (energy release rate) via traction-separation integration."""
+        """Calculate G_c (energy release rate) via traction-separation integration.
+
+        Traction conventions for ELFORM 19/20 cohesive elements
+        (*MAT_138/184/185/186), per LSTC dynasupport note "Cohesive material
+        models": LS-DYNA writes force-per-unit-area in the element local frame
+        (local-z normal to the midsurface).  Storage slots:
+            sig_zz  -> T_n  (normal traction,  Mode I  driver)
+            sig_xx  -> T_s1 (shear traction #1, Mode II driver)
+            sig_yy  -> T_s2 (shear traction #2, Mode II driver)
+            sig_xy, sig_yz, sig_zx  -> empty / identically zero
+        Separation (delta) is still computed in the global frame via nodal
+        displacements and projected onto the face normal for Mode I (delta_n)
+        or its complement for Mode II (delta_t).
+        """
         mode = mode.upper()
         if mode not in {"I", "II", "C"}:
             raise ValueError("Mode must be one of 'I', 'II', or 'C'")
@@ -1748,20 +1731,13 @@ class Element:
 
         normal_traction = self.get_normal_stress_for_face(bottom_face)
 
+        # Shear traction for cohesive elements (ELFORM 19/20, *MAT_138/184/185/186).
+        # LS-DYNA stores the two in-plane shear components in sig_xx and sig_yy;
+        # sig_xy, sig_yz, sig_zx are empty/zero for cohesive elements.
+        # (LSTC dynasupport note "Cohesive material models")
         if self.stress_data is not None:
-            if mode == "II":
-                tau1 = self.stress_data['sig_xx']
-                tau2 = 0 * tau1
-            else:
-                if np.abs(normal[2]) >= np.abs(normal[0]) and np.abs(normal[2]) >= np.abs(normal[1]):
-                    tau1 = self.stress_data['sig_zx']
-                    tau2 = self.stress_data['sig_yz']
-                elif np.abs(normal[0]) >= np.abs(normal[1]):
-                    tau1 = self.stress_data['sig_xy']
-                    tau2 = self.stress_data['sig_zx']
-                else:
-                    tau1 = self.stress_data['sig_xy']
-                    tau2 = self.stress_data['sig_yz']
+            tau1 = self.stress_data['sig_xx']
+            tau2 = self.stress_data['sig_yy']
         else:
             tau1 = 0
             tau2 = 0
