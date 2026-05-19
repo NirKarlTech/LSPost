@@ -861,6 +861,45 @@ else:
                                         key="gn_display_mode",
                                     )
 
+                                    # ── Cohesive material selector (for G normalisation) ──
+                                    _coh_mats = list(model.get_cohesive_materials())
+                                    if ext_file is not None and 'ext_kf' in dir():
+                                        try:
+                                            _ext_coh = ext_kf._parse_cohesive_materials(ext_lines)
+                                            _existing_mids = {m['mid'] for m in _coh_mats}
+                                            for _m in _ext_coh:
+                                                if _m['mid'] not in _existing_mids:
+                                                    _coh_mats.append(_m)
+                                        except Exception:
+                                            pass
+
+                                    _sel_mat = None
+                                    if _coh_mats:
+                                        if len(_coh_mats) == 1:
+                                            _sel_mat = _coh_mats[0]
+                                            st.info(
+                                                f"Cohesive material: **{_sel_mat['title']}** — "
+                                                f"G_Ic = {_sel_mat['gic']:.4g} J/m²,  "
+                                                f"G_IIc = {_sel_mat['giic']:.4g} J/m²"
+                                            )
+                                        else:
+                                            _mat_keys = [m['title'] for m in _coh_mats]
+                                            _mat_choice = st.selectbox(
+                                                "Cohesive material for G normalisation:",
+                                                options=_mat_keys,
+                                                key="gn_mat_selector",
+                                            )
+                                            _sel_mat = next(m for m in _coh_mats if m['title'] == _mat_choice)
+                                            st.caption(
+                                                f"G_Ic = {_sel_mat['gic']:.4g} J/m²  |  "
+                                                f"G_IIc = {_sel_mat['giic']:.4g} J/m²"
+                                            )
+                                    else:
+                                        st.caption("No *MAT_COHESIVE_GENERAL found in keyfile – G values plotted as-is (J/m²).")
+
+                                    _gic  = _sel_mat['gic']  if _sel_mat else None
+                                    _giic = _sel_mat['giic'] if _sel_mat else None
+
                                     # Prepare element points: G_1c (mode I) and G_2c (mode II)
                                     points_I = []
                                     points_II = []
@@ -875,55 +914,79 @@ else:
                                             points_I.append({'eid': eid, 'G': np.nan})
                                             points_II.append({'eid': eid, 'G': np.nan})
 
-                                    # Fit power-law curve: log(G) = a + b*log(N)  =>  G = exp(a) * N^b
+                                    # Normalise G by G_Ic / G_IIc (if material is available)
+                                    def _norm(g, denom):
+                                        if denom and denom > 0 and not np.isnan(g) and g >= 0:
+                                            return g / denom
+                                        return g
+
+                                    points_I_norm  = [{'eid': p['eid'], 'G': _norm(p['G'], _gic)}  for p in points_I]
+                                    points_II_norm = [{'eid': p['eid'], 'G': _norm(p['G'], _giic)} for p in points_II]
+
+                                    # Fit power-law curve on normalised G: log(G_norm) = a + b*log(N)
                                     fit_coeffs = None
                                     a_coeff = b_coeff = None
                                     if curve_data and len(curve_data) >= 2:
                                         curve_N_vals = np.array([n for n, g in curve_data])
-                                        curve_G_vals = np.array([g for n, g in curve_data])
+                                        curve_G_raw  = np.array([g for n, g in curve_data])
+                                        # Normalise curve G values too (use G_Ic for Mode I denominator)
+                                        _curve_denom = _gic if _gic else 1.0
+                                        curve_G_vals = curve_G_raw / _curve_denom
                                         pos_mask = (curve_N_vals > 0) & (curve_G_vals > 0)
                                         if pos_mask.sum() >= 2:
                                             log_N = np.log(curve_N_vals[pos_mask])
                                             log_G = np.log(curve_G_vals[pos_mask])
                                             fit_coeffs = np.polyfit(log_N, log_G, 1)
                                             b_coeff, a_coeff = fit_coeffs
+                                    else:
+                                        curve_G_vals = np.array([])
+                                        curve_N_vals = np.array([])
 
-                                    # Interpolate N for each element point
-                                    for pt in points_I + points_II:
-                                        if fit_coeffs is not None and not np.isnan(pt['G']) and pt['G'] > 0:
-                                            log_n = (np.log(pt['G']) - a_coeff) / b_coeff
-                                            pt['N'] = float(np.exp(log_n))
+                                    # Interpolate N for each element point (using normalised G)
+                                    for pt_n in points_I_norm + points_II_norm:
+                                        if fit_coeffs is not None and not np.isnan(pt_n['G']) and pt_n['G'] > 0:
+                                            log_n = (np.log(pt_n['G']) - a_coeff) / b_coeff
+                                            pt_n['N'] = float(np.exp(log_n))
                                         else:
-                                            pt['N'] = np.nan
+                                            pt_n['N'] = np.nan
+                                    # Copy N back to original points list
+                                    for p_orig, p_norm in zip(points_I, points_I_norm):
+                                        p_orig['N'] = p_norm['N']
+                                    for p_orig, p_norm in zip(points_II, points_II_norm):
+                                        p_orig['N'] = p_norm['N']
 
-                                    # Helper: build a G-N figure for a given set of points
-                                    def _build_gn_figure(points_list, mode_label, marker_symbol, fit_line_color):
+                                    _g_axis_label_I  = "G / G_Ic"  if _gic  else "G (J/m²)"
+                                    _g_axis_label_II = "G / G_IIc" if _giic else "G (J/m²)"
+
+                                    # Helper: build a G-N figure using normalised G values
+                                    def _build_gn_figure(points_norm, mode_label, marker_symbol, fit_line_color, g_axis_label, curve_denom):
                                         fig = go.Figure()
-                                        if curve_data:
-                                            curve_N = [n for n, g in curve_data]
-                                            curve_G = [g for n, g in curve_data]
+                                        if len(curve_N_vals) > 0:
+                                            _denom = curve_denom if curve_denom else 1.0
+                                            _cG = [g / _denom for _, g in curve_data]
+                                            _cN = [n for n, _ in curve_data]
                                             fig.add_trace(go.Scatter(
-                                                x=curve_N, y=curve_G,
+                                                x=_cN, y=_cG,
                                                 mode='lines', name="Linear segments",
                                                 line=dict(width=1, color='gray', dash='dash'),
                                             ))
                                             fig.add_trace(go.Scatter(
-                                                x=curve_N, y=curve_G,
+                                                x=_cN, y=_cG,
                                                 mode='markers', name="G-N data points",
                                                 marker=dict(size=10, color='black', symbol='diamond'),
-                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>G = %{y:.4E}<extra></extra>",
+                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>" + g_axis_label + " = %{y:.4E}<extra></extra>",
                                             ))
                                             if fit_coeffs is not None:
-                                                n_min, n_max = min(curve_N), max(curve_N)
+                                                n_min, n_max = min(_cN), max(_cN)
                                                 n_fit = np.logspace(np.log10(n_min), np.log10(n_max), 200)
                                                 g_fit = np.exp(a_coeff) * n_fit ** b_coeff
                                                 fig.add_trace(go.Scatter(
                                                     x=n_fit, y=g_fit, mode='lines',
-                                                    name=f"Fitted: G = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
+                                                    name=f"Fitted: G_norm = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
                                                     line=dict(width=3, color=fit_line_color),
                                                 ))
                                         colors = px.colors.qualitative.Plotly
-                                        for i, pt in enumerate(points_list):
+                                        for i, pt in enumerate(points_norm):
                                             color = colors[i % len(colors)]
                                             fig.add_trace(go.Scatter(
                                                 x=[pt['N']], y=[pt['G']],
@@ -933,14 +996,14 @@ else:
                                                             line=dict(width=2, color='black')),
                                                 hovertemplate=(
                                                     f"<b>Element {pt['eid']} ({mode_label})</b><br>"
-                                                    f"{mode_label} = {pt['G']:.4E} J/m²<br>"
+                                                    f"{g_axis_label} = {pt['G']:.4E}<br>"
                                                     f"N = {pt['N']:.4E}<extra></extra>"
                                                 ),
                                             ))
                                         fig.update_layout(
                                             title=f"G-N Plot ({mode_label})",
                                             xaxis_title="N (Cycles to Failure)",
-                                            yaxis_title=f"G ({mode_label}, J/m²)",
+                                            yaxis_title=g_axis_label,
                                             hovermode='closest',
                                             xaxis_type='log',
                                             template='plotly_white',
@@ -949,51 +1012,52 @@ else:
                                         return fig
 
                                     if gn_display == "Mode I (G₁c)":
-                                        fig = _build_gn_figure(points_I, "G₁c", "circle", "blue")
+                                        fig = _build_gn_figure(points_I_norm, "G₁c", "circle", "blue", _g_axis_label_I, _gic)
                                         st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_I_{selected_lcid}")
 
                                     elif gn_display == "Mode II (G₂c)":
-                                        fig = _build_gn_figure(points_II, "G₂c", "triangle-up", "red")
+                                        fig = _build_gn_figure(points_II_norm, "G₂c", "triangle-up", "red", _g_axis_label_II, _giic)
                                         st.plotly_chart(fig, use_container_width=True, key=f"gn_plot_II_{selected_lcid}")
 
                                     elif gn_display == "Side by Side":
                                         col_left, col_right = st.columns(2)
                                         with col_left:
                                             st.markdown("**Mode I (G₁c)**")
-                                            fig_I = _build_gn_figure(points_I, "G₁c", "circle", "blue")
+                                            fig_I = _build_gn_figure(points_I_norm, "G₁c", "circle", "blue", _g_axis_label_I, _gic)
                                             st.plotly_chart(fig_I, use_container_width=True, key=f"gn_plot_sbs_I_{selected_lcid}")
                                         with col_right:
                                             st.markdown("**Mode II (G₂c)**")
-                                            fig_II = _build_gn_figure(points_II, "G₂c", "triangle-up", "red")
+                                            fig_II = _build_gn_figure(points_II_norm, "G₂c", "triangle-up", "red", _g_axis_label_II, _giic)
                                             st.plotly_chart(fig_II, use_container_width=True, key=f"gn_plot_sbs_II_{selected_lcid}")
 
                                     else:  # Overlay
                                         fig = go.Figure()
-                                        if curve_data:
-                                            curve_N = [n for n, g in curve_data]
-                                            curve_G = [g for n, g in curve_data]
+                                        if len(curve_N_vals) > 0:
+                                            _denom = _gic if _gic else 1.0
+                                            _cG = [g / _denom for _, g in curve_data]
+                                            _cN = [n for n, _ in curve_data]
                                             fig.add_trace(go.Scatter(
-                                                x=curve_N, y=curve_G,
+                                                x=_cN, y=_cG,
                                                 mode='lines', name="Linear segments",
                                                 line=dict(width=1, color='gray', dash='dash'),
                                             ))
                                             fig.add_trace(go.Scatter(
-                                                x=curve_N, y=curve_G,
+                                                x=_cN, y=_cG,
                                                 mode='markers', name="G-N data points",
                                                 marker=dict(size=10, color='black', symbol='diamond'),
-                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>G = %{y:.4E}<extra></extra>",
+                                                hovertemplate="<b>Data point</b><br>N = %{x:.4E}<br>G_norm = %{y:.4E}<extra></extra>",
                                             ))
                                             if fit_coeffs is not None:
-                                                n_min, n_max = min(curve_N), max(curve_N)
+                                                n_min, n_max = min(_cN), max(_cN)
                                                 n_fit = np.logspace(np.log10(n_min), np.log10(n_max), 200)
                                                 g_fit = np.exp(a_coeff) * n_fit ** b_coeff
                                                 fig.add_trace(go.Scatter(
                                                     x=n_fit, y=g_fit, mode='lines',
-                                                    name=f"Fitted: G = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
+                                                    name=f"Fitted: G_norm = {np.exp(a_coeff):.3f} · N^({b_coeff:.3f})",
                                                     line=dict(width=3, color='blue'),
                                                 ))
                                         colors = px.colors.qualitative.Plotly
-                                        for i, (pt_I, pt_II) in enumerate(zip(points_I, points_II)):
+                                        for i, (pt_I, pt_II) in enumerate(zip(points_I_norm, points_II_norm)):
                                             color = colors[i % len(colors)]
                                             fig.add_trace(go.Scatter(
                                                 x=[pt_I['N']], y=[pt_I['G']],
@@ -1003,7 +1067,7 @@ else:
                                                             line=dict(width=2, color='black')),
                                                 hovertemplate=(
                                                     f"<b>Element {pt_I['eid']} (Mode I)</b><br>"
-                                                    f"G₁c = {pt_I['G']:.4E} J/m²<br>"
+                                                    f"{_g_axis_label_I} = {pt_I['G']:.4E}<br>"
                                                     f"N = {pt_I['N']:.4E}<extra></extra>"
                                                 ),
                                             ))
@@ -1015,14 +1079,15 @@ else:
                                                             line=dict(width=2, color='black')),
                                                 hovertemplate=(
                                                     f"<b>Element {pt_II['eid']} (Mode II)</b><br>"
-                                                    f"G₂c = {pt_II['G']:.4E} J/m²<br>"
+                                                    f"{_g_axis_label_II} = {pt_II['G']:.4E}<br>"
                                                     f"N = {pt_II['N']:.4E}<extra></extra>"
                                                 ),
                                             ))
+                                        _ov_ylabel = "G / G_Ic" if _gic else "G (J/m²)"
                                         fig.update_layout(
                                             title="G-N Plot (G₁c and G₂c Overlay)",
                                             xaxis_title="N (Cycles to Failure)",
-                                            yaxis_title="G (J/m²)",
+                                            yaxis_title=_ov_ylabel,
                                             hovermode='closest',
                                             xaxis_type='log',
                                             template='plotly_white',
@@ -1053,17 +1118,13 @@ else:
                                     _btn_col1, _btn_col2 = st.columns(2)
                                     with _btn_col1:
                                         if st.button("🎨 Generate N Fringe", key="gn_fringe_btn", type="primary"):
-                                            st.session_state['gn_fringe_params'] = {
-                                                'mode': fringe_mode,
-                                                'log': fringe_log,
-                                                'lcid': selected_lcid,
-                                            }
+                                            st.session_state['gn_fringe_shown'] = True
                                     with _btn_col2:
-                                        # Compute N per element using current mode/log settings
+                                        # Build N values for SCL export using current mode settings
                                         _export_n: dict = {}
                                         for _pt_I, _pt_II in zip(points_I, points_II):
                                             _eid = _pt_I['eid']
-                                            _nI = _pt_I.get('N', np.nan)
+                                            _nI  = _pt_I.get('N', np.nan)
                                             _nII = _pt_II.get('N', np.nan)
                                             if fringe_mode == "Mode I (G₁c)":
                                                 _export_n[_eid] = _nI
@@ -1075,8 +1136,6 @@ else:
 
                                         _scale_label = "log10(N)" if fringe_log else "N (linear)"
                                         _cb_title = "log10(N) - Cycles to Failure" if fringe_log else "N - Cycles to Failure"
-
-                                        # Build SCL script (LS-PrePost Script Language)
                                         _scl = [
                                             "/* N Fringe - Cycles to Failure",
                                             f" * G-N curve : {selected_lcid}",
@@ -1107,13 +1166,25 @@ else:
                                             '    SCLGetDataCenterIntArray("solid_ids", &eids, 0, 0);',
                                             "",
                                             "    /* Assign computed value for each analysed element */",
+                                            "    /* Destroyed elements are assigned -1 */",
                                             "    for(i = 0; i < numSolidEle; i = i+1) {",
                                             "        eid = eids[i];",
                                         ]
-                                        for _eid, _N in _export_n.items():
-                                            if not np.isnan(_N) and _N > 0:
+                                        _sim_end = model.end_time
+                                        for _eid_s, _N in _export_n.items():
+                                            try:
+                                                _el = model.get_element(_eid_s)
+                                                _is_dest = (
+                                                    _el.stress_data is not None
+                                                    and _el.stress_data.index.max() < _sim_end * 0.99
+                                                )
+                                            except Exception:
+                                                _is_dest = False
+                                            if _is_dest:
+                                                _scl.append(f"        if(eid == {_eid_s}) results[i] = -1.0;  /* DESTROYED */")
+                                            elif not np.isnan(_N) and _N > 0:
                                                 _val = float(np.log10(_N)) if fringe_log else float(_N)
-                                                _scl.append(f"        if(eid == {_eid}) results[i] = {_val:.6f};")
+                                                _scl.append(f"        if(eid == {_eid_s}) results[i] = {_val:.6f};")
                                         _scl += [
                                             "    }",
                                             "",
@@ -1134,108 +1205,154 @@ else:
                                             help="Download SCL script – run it in LS-PrePost to display this fringe on the model",
                                         )
 
-                                    if 'gn_fringe_params' in st.session_state:
-                                        _fp = st.session_state['gn_fringe_params']
-                                        _fmode = _fp['mode']
-                                        _flog = _fp['log']
+                                    if st.session_state.get('gn_fringe_shown', False):
+                                        # Always use the current live widget values (fixes log-scale toggle)
+                                        _fmode = fringe_mode
+                                        _flog  = fringe_log
 
-                                        # Resolve N per element for the chosen mode
+                                        # Resolve N per element for chosen mode
                                         fringe_n = {}
                                         for pt_I, pt_II in zip(points_I, points_II):
                                             eid = pt_I['eid']
-                                            n_I = pt_I.get('N', np.nan)
+                                            n_I  = pt_I.get('N', np.nan)
                                             n_II = pt_II.get('N', np.nan)
                                             if _fmode == "Mode I (G₁c)":
                                                 fringe_n[eid] = n_I
                                             elif _fmode == "Mode II (G₂c)":
                                                 fringe_n[eid] = n_II
-                                            else:  # Critical: lowest N
+                                            else:
                                                 valid = [v for v in [n_I, n_II] if not np.isnan(v) and v > 0]
                                                 fringe_n[eid] = min(valid) if valid else np.nan
 
-                                        # Build 3-D mesh: bottom face of each cohesive element
-                                        x_v, y_v, z_v = [], [], []
-                                        tri_i, tri_j, tri_k = [], [], []
-                                        cell_vals: list = []
-                                        # Centroid lists for hover labels
-                                        cx_v, cy_v, cz_v = [], [], []
-                                        hover_custom = []
-                                        fringe_rows = []
+                                        sim_end_time = model.end_time
+
+                                        # Mesh geometry lists — normal elements
+                                        x_v, y_v, z_v       = [], [], []
+                                        tri_i, tri_j, tri_k  = [], [], []
+                                        cell_vals: list      = []
+                                        cx_v, cy_v, cz_v     = [], [], []
+                                        hover_custom         = []
+                                        # Destroyed elements (colored black)
+                                        x_d, y_d, z_d           = [], [], []
+                                        tri_id, tri_jd, tri_kd  = [], [], []
+                                        cx_d, cy_d, cz_d        = [], [], []
+                                        hover_custom_d          = []
+                                        fringe_rows             = []
                                         v_off = 0
+                                        v_off_d = 0
 
                                         for eid, N_val in fringe_n.items():
                                             try:
                                                 element = model.get_element(eid)
+                                                # Detect destroyed elements
+                                                is_destroyed = (
+                                                    element.stress_data is not None
+                                                    and element.stress_data.index.max() < sim_end_time * 0.99
+                                                )
                                                 bottom_face, _ = element.get_faces()
                                                 coords = [element.initial_node_coords[nid] for nid in bottom_face]
-                                                for c in coords:
-                                                    x_v.append(c['x'])
-                                                    y_v.append(c['y'])
-                                                    z_v.append(c['z'])
-                                                # Quad → 2 triangles (fan from vertex 0)
-                                                tri_i += [v_off, v_off]
-                                                tri_j += [v_off + 1, v_off + 2]
-                                                tri_k += [v_off + 2, v_off + 3]
-                                                color_val = (
-                                                    np.log10(N_val)
-                                                    if (_flog and not np.isnan(N_val) and N_val > 0)
-                                                    else (N_val if (not np.isnan(N_val) and N_val > 0) else np.nan)
-                                                )
-                                                cell_vals += [color_val, color_val]
-                                                v_off += 4
-                                                log_n_str = f"{np.log10(N_val):.3f}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
-                                                n_str = f"{N_val:.4E}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
-                                                # Centroid of bottom face for hover marker
-                                                cx_v.append(sum(c['x'] for c in coords) / len(coords))
-                                                cy_v.append(sum(c['y'] for c in coords) / len(coords))
-                                                cz_v.append(sum(c['z'] for c in coords) / len(coords))
-                                                hover_custom.append([eid, n_str, log_n_str])
-                                                fringe_rows.append({
-                                                    'Element ID': eid,
-                                                    'N (cycles)': n_str,
-                                                    'log₁₀(N)': log_n_str,
-                                                })
+                                                cx = sum(c['x'] for c in coords) / len(coords)
+                                                cy = sum(c['y'] for c in coords) / len(coords)
+                                                cz = sum(c['z'] for c in coords) / len(coords)
+
+                                                if is_destroyed:
+                                                    for c in coords:
+                                                        x_d.append(c['x']); y_d.append(c['y']); z_d.append(c['z'])
+                                                    tri_id += [v_off_d, v_off_d]
+                                                    tri_jd += [v_off_d + 1, v_off_d + 2]
+                                                    tri_kd += [v_off_d + 2, v_off_d + 3]
+                                                    v_off_d += 4
+                                                    cx_d.append(cx); cy_d.append(cy); cz_d.append(cz)
+                                                    hover_custom_d.append([eid])
+                                                    fringe_rows.append({'Element ID': eid, 'N (cycles)': 'DESTROYED', 'log₁₀(N)': '—'})
+                                                else:
+                                                    for c in coords:
+                                                        x_v.append(c['x']); y_v.append(c['y']); z_v.append(c['z'])
+                                                    tri_i += [v_off, v_off]
+                                                    tri_j += [v_off + 1, v_off + 2]
+                                                    tri_k += [v_off + 2, v_off + 3]
+                                                    color_val = (
+                                                        np.log10(N_val)
+                                                        if (_flog and not np.isnan(N_val) and N_val > 0)
+                                                        else (N_val if (not np.isnan(N_val) and N_val > 0) else np.nan)
+                                                    )
+                                                    cell_vals += [color_val, color_val]
+                                                    v_off += 4
+                                                    log_n_str = f"{np.log10(N_val):.3f}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
+                                                    n_str = f"{N_val:.4E}" if (not np.isnan(N_val) and N_val > 0) else "N/A"
+                                                    cx_v.append(cx); cy_v.append(cy); cz_v.append(cz)
+                                                    hover_custom.append([eid, n_str, log_n_str])
+                                                    fringe_rows.append({'Element ID': eid, 'N (cycles)': n_str, 'log₁₀(N)': log_n_str})
                                             except Exception:
                                                 pass
 
-                                        if x_v:
-                                            valid_cv = [v for v in cell_vals if not np.isnan(v)]
-                                            cmin_v = min(valid_cv) if valid_cv else 0.0
-                                            cmax_v = max(valid_cv) if valid_cv else 1.0
-                                            cell_clean = [v if not np.isnan(v) else cmin_v for v in cell_vals]
+                                        if x_v or x_d:
                                             cb_title = "log₁₀(N)" if _flog else "N (cycles)"
+                                            fig_fringe = go.Figure()
 
-                                            fig_fringe = go.Figure(go.Mesh3d(
-                                                x=x_v, y=y_v, z=z_v,
-                                                i=tri_i, j=tri_j, k=tri_k,
-                                                intensity=cell_clean,
-                                                intensitymode='cell',
-                                                colorscale='Jet',
-                                                cmin=cmin_v, cmax=cmax_v,
-                                                colorbar=dict(
-                                                    title=dict(text=cb_title, side='right'),
-                                                    tickformat='.2f',
-                                                ),
-                                                showscale=True,
-                                                flatshading=True,
-                                                hoverinfo='skip',
-                                            ))
-                                            # Invisible markers at centroids — carry the hover tooltip
-                                            fig_fringe.add_trace(go.Scatter3d(
-                                                x=cx_v, y=cy_v, z=cz_v,
-                                                mode='markers',
-                                                marker=dict(size=10, color='rgba(0,0,0,0)'),
-                                                customdata=hover_custom,
-                                                hovertemplate=(
-                                                    "<b>Element %{customdata[0]}</b><br>"
-                                                    "N = %{customdata[1]} cycles<br>"
-                                                    "log₁₀(N) = %{customdata[2]}"
-                                                    "<extra></extra>"
-                                                ),
-                                                showlegend=False,
-                                            ))
+                                            # Normal elements — Jet reversed (blue = high N, red = low N)
+                                            if x_v:
+                                                valid_cv  = [v for v in cell_vals if not np.isnan(v)]
+                                                cmin_v    = min(valid_cv) if valid_cv else 0.0
+                                                cmax_v    = max(valid_cv) if valid_cv else 1.0
+                                                cell_clean = [v if not np.isnan(v) else cmin_v for v in cell_vals]
+                                                fig_fringe.add_trace(go.Mesh3d(
+                                                    x=x_v, y=y_v, z=z_v,
+                                                    i=tri_i, j=tri_j, k=tri_k,
+                                                    intensity=cell_clean,
+                                                    intensitymode='cell',
+                                                    colorscale='Jet',
+                                                    reversescale=True,
+                                                    cmin=cmin_v, cmax=cmax_v,
+                                                    colorbar=dict(
+                                                        title=dict(text=cb_title, side='right'),
+                                                        tickformat='.2f',
+                                                    ),
+                                                    showscale=True,
+                                                    flatshading=True,
+                                                    hoverinfo='skip',
+                                                    name='Elements',
+                                                ))
+                                                fig_fringe.add_trace(go.Scatter3d(
+                                                    x=cx_v, y=cy_v, z=cz_v,
+                                                    mode='markers',
+                                                    marker=dict(size=10, color='rgba(0,0,0,0)'),
+                                                    customdata=hover_custom,
+                                                    hovertemplate=(
+                                                        "<b>Element %{customdata[0]}</b><br>"
+                                                        "N = %{customdata[1]} cycles<br>"
+                                                        "log₁₀(N) = %{customdata[2]}"
+                                                        "<extra></extra>"
+                                                    ),
+                                                    showlegend=False,
+                                                ))
+
+                                            # Destroyed elements — solid black
+                                            if x_d:
+                                                fig_fringe.add_trace(go.Mesh3d(
+                                                    x=x_d, y=y_d, z=z_d,
+                                                    i=tri_id, j=tri_jd, k=tri_kd,
+                                                    color='black',
+                                                    hoverinfo='skip',
+                                                    showscale=False,
+                                                    flatshading=True,
+                                                    name='Destroyed',
+                                                ))
+                                                fig_fringe.add_trace(go.Scatter3d(
+                                                    x=cx_d, y=cy_d, z=cz_d,
+                                                    mode='markers',
+                                                    marker=dict(size=10, color='rgba(0,0,0,0)'),
+                                                    customdata=hover_custom_d,
+                                                    hovertemplate=(
+                                                        "<b>Element %{customdata[0]}</b><br>"
+                                                        "Status: <b>DESTROYED</b>"
+                                                        "<extra></extra>"
+                                                    ),
+                                                    showlegend=False,
+                                                ))
+
                                             fig_fringe.update_layout(
-                                                title=f"N Fringe – {_fmode}  |  G-N curve: {_fp['lcid']}",
+                                                title=f"N Fringe – {_fmode}  |  G-N curve: {selected_lcid}",
                                                 scene=dict(
                                                     xaxis_title="X",
                                                     yaxis_title="Y",
@@ -1248,7 +1365,7 @@ else:
                                             st.plotly_chart(
                                                 fig_fringe,
                                                 use_container_width=True,
-                                                key=f"gn_fringe_{_fp['lcid']}_{_fmode}_{_flog}",
+                                                key=f"gn_fringe_{selected_lcid}_{_fmode}_{_flog}",
                                             )
                                             st.dataframe(pd.DataFrame(fringe_rows), use_container_width=True)
                                         else:

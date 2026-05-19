@@ -829,6 +829,68 @@ class KeyFileData:
         """Return dict of G-N curves parsed from the keyfile (lcid -> {'title', 'data'})."""
         return getattr(self, 'gn_curves', {})
 
+    def _parse_cohesive_materials(self, lines):
+        """Parse *MAT_COHESIVE_GENERAL(_TITLE) blocks to extract GIC and GIIC.
+        Returns list of dicts: [{mid, title, gic, giic}, ...]
+        """
+        materials = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            upper = line.upper()
+            if upper.startswith('*MAT_COHESIVE_GENERAL'):
+                has_title = '_TITLE' in upper
+                i += 1
+                title = ''
+                if has_title:
+                    while i < len(lines) and lines[i].strip().startswith('$'):
+                        i += 1
+                    if i < len(lines) and not lines[i].strip().startswith('*'):
+                        title = lines[i].strip()
+                        i += 1
+                # Skip comments before Card 1
+                while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith('$')):
+                    i += 1
+                # Card 1: MID, RO, ROFLG, INTFAIL, EPSF, TFAIL
+                mid = None
+                if i < len(lines) and not lines[i].strip().startswith('*'):
+                    card1 = lines[i].strip().split()
+                    try:
+                        mid = int(float(card1[0]))
+                    except (ValueError, IndexError):
+                        pass
+                    i += 1
+                # Skip comments before Card 2
+                while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith('$')):
+                    i += 1
+                # Card 2: EN, ET, GIC, GIIC
+                gic = giic = None
+                if i < len(lines) and not lines[i].strip().startswith('*'):
+                    card2 = lines[i].strip().split()
+                    try:
+                        if len(card2) >= 3:
+                            gic = float(card2[2])
+                        if len(card2) >= 4:
+                            giic = float(card2[3])
+                    except (ValueError, IndexError):
+                        pass
+                    i += 1
+                if mid is not None and gic is not None:
+                    mat_title = title if title else f'MAT_{mid}'
+                    materials.append({
+                        'mid': mid,
+                        'title': mat_title,
+                        'gic': gic,
+                        'giic': giic if giic is not None else gic,
+                    })
+            else:
+                i += 1
+        return materials
+
+    def get_cohesive_materials(self):
+        """Return list of parsed cohesive materials [{mid, title, gic, giic}, ...]."""
+        return getattr(self, 'cohesive_materials', [])
+
     def _parse_gn_curves(self, lines):
         """Parse all *DEFINE_CURVE_TITLE blocks with title 'G-N'. Return dict: lcid -> {'title':..., 'data':[(N,G),...]}."""
         gn_curves = {}
@@ -873,6 +935,7 @@ class KeyFileData:
             lines = f.readlines()
         # Parse G-N curves before other parsing
         self.gn_curves = self._parse_gn_curves(lines)
+        self.cohesive_materials = self._parse_cohesive_materials(lines)
         current_keyword = None
         current_set_name = None
         reading_set_elements = False
@@ -1878,6 +1941,12 @@ class Model:
         if self._keyfile_data is not None:
             return self._keyfile_data.get_gn_curves()
         return {}
+
+    def get_cohesive_materials(self):
+        """Return list of cohesive materials from the keyfile [{mid, title, gic, giic}, ...]."""
+        if self._keyfile_data is not None:
+            return self._keyfile_data.get_cohesive_materials()
+        return []
 
     def __init__(
         self,
