@@ -1207,6 +1207,8 @@ else:
                                             "        SCLFringeDCToModel(SOLID, 1, numSolidEle, results, state, buf);",
                                             "    }",
                                             "",
+                                            '    ExecuteCommand("range reversecolors on");',
+                                            "",
                                             "    free(results); results = NULL;",
                                             "}",
                                             "main();",
