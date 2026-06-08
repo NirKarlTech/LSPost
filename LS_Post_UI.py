@@ -1146,6 +1146,7 @@ else:
                                         _elem_pos_map = {eid: i for i, eid in enumerate(_all_eids_kf)}
                                         _sim_end = model.end_time
                                         _pos_lines = []
+                                        _sel_eids = []  # elements to add to selection
                                         for _eid_s, _N in _export_n.items():
                                             _pos = _elem_pos_map.get(_eid_s)
                                             if _pos is None:
@@ -1163,12 +1164,14 @@ else:
                                                     f"    results[{_pos}] = -1.0;"
                                                     f"  /* element {_eid_s} DESTROYED */"
                                                 )
+                                                _sel_eids.append(_eid_s)
                                             elif not np.isnan(_N) and _N > 0:
                                                 _val = float(np.log10(_N)) if fringe_log else float(_N)
                                                 _pos_lines.append(
                                                     f"    results[{_pos}] = {_val:.6f};"
                                                     f"  /* element {_eid_s} */"
                                                 )
+                                                _sel_eids.append(_eid_s)
 
                                         _scl = [
                                             "/* N Fringe - Cycles to Failure",
@@ -1208,6 +1211,16 @@ else:
                                             "    }",
                                             "",
                                             '    ExecuteCommand("range reversecolors on");',
+                                            "",
+                                            "    /* Select fringe elements then isolate them */",
+                                            '    ExecuteCommand("genselect clear");',
+                                        ] + [
+                                            f'    ExecuteCommand("genselect element add solid {_e}/F0/0");'
+                                            for _e in _sel_eids
+                                        ] + [
+                                            '    ExecuteCommand("blank selection");',
+                                            '    ExecuteCommand("blank reverse 19");',
+                                            '    ExecuteCommand("ac");',
                                             "",
                                             "    free(results); results = NULL;",
                                             "}",
